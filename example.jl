@@ -1,5 +1,7 @@
 using SparseArrays, LinearAlgebra
 
+using LinearAlgebra: givensAlgorithm
+
 function linear_part_sparse(n, α)
     h = 1.0 / n
 
@@ -119,10 +121,63 @@ function orthogonalize_and_normalize!(V::AbstractMatrix{T}, w::AbstractVector, h
     nrm
 end
 
+function remove_first_col!(Q, R)
+    n = size(R, 2)
+
+    for i = 2:n
+        c, s, nrm = givensAlgorithm(R[i - 1, i], R[i, i])
+        R[i - 1, i] = nrm
+        R[i    , i] = 0
+
+        # Apply to R
+        for j = i+1:n
+            r₁ = R[i - 1, j]
+            r₂ = R[i    , j]
+    
+            r₁′ =   c * r₁ + s * r₂
+            r₂′ = -s' * r₁ + c * r₂
+            
+            R[i - 1, j] = r₁′
+            R[i    , j] = r₂′
+        end
+        
+        # Apply to Q
+        for j = 1:size(Q, 1)
+            q₁ = Q[j, i - 1]
+            q₂ = Q[j, i    ]
+    
+            q₁′ = q₁ *  c + q₂ * s'
+            q₂′ = q₁ * -s + q₂ * c
+    
+            Q[j, i - 1] = q₁′
+            Q[j, i    ] = q₂′
+        end
+    end
+
+    # Now shift R
+    R[1:n-1, 1:n-1] .= R[1:n-1, 2:n]
+
+    return nothing
+end
+
+using Test
+
+function test_remove_first_col(n = 10)
+    X = rand(100, n)
+    decomp = qr(X)
+    Q = Matrix(decomp.Q)
+    R = decomp.R
+
+    remove_first_col!(Q, R)
+
+    @test norm(X[:, 2:end] .- Q[:, 1:n-1] * R[1:n-1,1:n-1]) < 1e-13
+    @test norm(Q[:, 1:n-1]' * Q[:, 1:n-1] - I) < 1e-14
+end
+
 function improved_broyden_gram_schmidt(f, x₀; σ = 0.3, max_iter = 10, max_len = max_iter)
-    ΔX = zeros(length(x₀), max_iter)
-    Q = zeros(length(x₀), max_iter)
-    R = zeros(max_iter, max_iter)
+    ΔX = zeros(length(x₀), max_len)
+    Q = zeros(length(x₀), max_len)
+    R = zeros(max_len, max_len)
 
     fₖ, fₖ₋₁ = similar(x₀), similar(x₀)
     xₖ, xₖ₋₁ = similar(x₀), similar(x₀)
@@ -135,24 +190,26 @@ function improved_broyden_gram_schmidt(f, x₀; σ = 0.3, max_iter = 10, max_len
     for k = 1:max_iter
         fₖ .= f(xₖ)
 
+        # Remove the first column of the QR decomp
+        if k - 1 > max_len
+            remove_first_col!(Q, R)
+            @views copyto!(ΔX[:, 1:max_len-1], ΔX[:, 2:max_len])
+        end
+
+        k′ = min(k - 1, max_len)
+
         # Gram-Schmidt Δfₖ₋₁ = fₖ - fₖ₋₁ w.r.t. previous ΔF
         # Repeated orthogonalization gives some stability and can be done with BLAS-2.
         if k > 1
-            Q[:, k - 1] .= fₖ .- fₖ₋₁
-            ΔX[:, k - 1] .= xₖ .- xₖ₋₁
+            Q[:, k′] .= fₖ .- fₖ₋₁
+            ΔX[:, k′] .= xₖ .- xₖ₋₁
 
-            R[k-1, k-1] = @views orthogonalize_and_normalize!(Q[:, 1:k-2], Q[:, k-1], R[1:k-2, k-1])
-
-            @show R[k-1, k-1]
+            R[k′, k′] = @views orthogonalize_and_normalize!(Q[:, 1:k′-1], Q[:, k′], R[1:k′-1, k′])
         end
 
-        start = max(1, (k - 1) - max_len + 1)
-
-        @views begin
-            Qₖ = Q[:, start:k-1]
-            Rₖ = R[start:k-1, start:k-1]
-            ΔXₖ = ΔX[:, start:k-1]
-        end
+        @views Qₖ = Q[:, 1:k′]
+        @views Rₖ = R[1:k′, 1:k′]
+        @views ΔXₖ = ΔX[:, 1:k′]
 
         fₖ₋₁ .= fₖ
         xₖ₋₁ .= xₖ
